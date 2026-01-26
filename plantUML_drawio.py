@@ -210,11 +210,14 @@ class PlantUMLParser:
                     match = re.match(r'usecase\s+(?:"([^"]+)"|(\S+))(?:\s+as\s+(\S+))?', line)
                     if match:
                         name = match.group(1) or match.group(2)
+                        # Convertir les \n littéraux en placeholder (sera remplacé par &#10; à la sauvegarde)
+                        name = name.replace('\\n', '__NEWLINE__')
                         alias = match.group(3) or name
                         usecases.append({"name": name, "alias": alias})
                 else:
                     # Format (Cas d'utilisation)
                     name = line.strip('()')
+                    name = name.replace('\\n', '__NEWLINE__')
                     usecases.append({"name": name, "alias": name})
 
             # Relations
@@ -368,11 +371,16 @@ class DrawIOGenerator:
         return self.add_rectangle(root, label, x, y, 30, 60, style)
 
     def add_secondary_actor(self, root: ET.Element, label: str, x: int, y: int) -> str:
-        """Ajoute un acteur secondaire (système externe) avec icône bonhomme et stéréotype <<system>>"""
-        style = "shape=umlActor;verticalLabelPosition=bottom;verticalAlign=top;html=1;"
-        # Ajoute le stéréotype <<system>> au-dessus du nom
-        label_with_stereotype = f"&lt;&lt;system&gt;&gt;&#xa;{label}"
-        return self.add_rectangle(root, label_with_stereotype, x, y, 30, 60, style)
+        """Ajoute un acteur secondaire (système externe) avec icône bonhomme entourée d'un cadre"""
+        # Créer le cadre rectangle autour de l'acteur
+        frame_style = "rounded=0;whiteSpace=wrap;html=1;fillColor=none;strokeColor=#666666;strokeWidth=1;"
+        frame_width, frame_height = 50, 80
+        frame_x = x - 10  # Centrer le cadre autour de l'acteur
+        self.add_rectangle(root, "", frame_x, y, frame_width, frame_height, frame_style)
+
+        # Créer l'acteur (bonhomme) à l'intérieur du cadre
+        actor_style = "shape=umlActor;verticalLabelPosition=bottom;verticalAlign=top;html=1;"
+        return self.add_rectangle(root, label, x, y + 10, 30, 60, actor_style)
 
     def add_arrow(self, root: ET.Element, source_id: str, target_id: str,
                  label: str = "", style: str = "endArrow=block;endFill=1;") -> str:
@@ -675,6 +683,8 @@ class DrawIOGenerator:
         xml_str = ET.tostring(mxfile, encoding='unicode')
         dom = minidom.parseString(xml_str)
         pretty_xml = dom.toprettyxml(indent="  ")
+        # Remplacer le placeholder par l'entité XML pour saut de ligne (après pretty printing)
+        pretty_xml = pretty_xml.replace('__NEWLINE__', '&#10;')
 
         with open(output_path, 'w', encoding='utf-8') as f:
             f.write(pretty_xml)

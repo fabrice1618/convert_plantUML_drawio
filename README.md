@@ -224,7 +224,3 @@ Pour ajouter le support d'un nouveau type de diagramme :
 ## Licence
 
 Script éducatif libre d'utilisation.
-
-## Auteur
-
-Généré avec Claude Code pour le projet CIEL24_annee2/E6.2
