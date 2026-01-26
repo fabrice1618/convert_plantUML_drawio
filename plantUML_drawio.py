@@ -196,11 +196,13 @@ class PlantUMLParser:
         for line in self.lines:
             # Acteurs
             if line.startswith('actor '):
-                match = re.match(r'actor\s+(?:"([^"]+)"|(\S+))(?:\s+as\s+(\S+))?', line)
+                match = re.match(r'actor\s+(?:"([^"]+)"|(\S+))(?:\s+as\s+(\S+))?(?:\s+<<(\w+)>>)?', line)
                 if match:
                     name = match.group(1) or match.group(2)
                     alias = match.group(3) or name
-                    actors.append({"name": name, "alias": alias})
+                    stereotype = match.group(4)  # "secondary" ou None
+                    is_secondary = stereotype == "secondary"
+                    actors.append({"name": name, "alias": alias, "is_secondary": is_secondary})
 
             # Cas d'utilisation
             elif line.startswith('usecase ') or (line.startswith('(') and line.endswith(')')):
@@ -364,6 +366,13 @@ class DrawIOGenerator:
         """Ajoute un acteur"""
         style = "shape=umlActor;verticalLabelPosition=bottom;verticalAlign=top;html=1;"
         return self.add_rectangle(root, label, x, y, 30, 60, style)
+
+    def add_secondary_actor(self, root: ET.Element, label: str, x: int, y: int) -> str:
+        """Ajoute un acteur secondaire (système externe) avec icône bonhomme et stéréotype <<system>>"""
+        style = "shape=umlActor;verticalLabelPosition=bottom;verticalAlign=top;html=1;"
+        # Ajoute le stéréotype <<system>> au-dessus du nom
+        label_with_stereotype = f"&lt;&lt;system&gt;&gt;&#xa;{label}"
+        return self.add_rectangle(root, label_with_stereotype, x, y, 30, 60, style)
 
     def add_arrow(self, root: ET.Element, source_id: str, target_id: str,
                  label: str = "", style: str = "endArrow=block;endFill=1;") -> str:
@@ -561,18 +570,29 @@ class DrawIOGenerator:
         usecases = data.get("usecases", [])
         relations = data.get("relations", [])
 
-        # Disposition: acteurs à gauche, cas d'utilisation au centre
+        # Séparer les acteurs primaires et secondaires
+        primary_actors = [a for a in actors if not a.get("is_secondary")]
+        secondary_actors = [a for a in actors if a.get("is_secondary")]
+
+        # Disposition: acteurs primaires à gauche, cas d'utilisation au centre, acteurs secondaires à droite
         actor_x = 50
         usecase_x_start = 250
+        secondary_x = usecase_x_start + 200  # À droite des use cases
         y_start = 100
         y_spacing = 120
 
         element_ids = {}
 
-        # Ajouter les acteurs
-        for i, actor in enumerate(actors):
+        # Ajouter les acteurs primaires à gauche
+        for i, actor in enumerate(primary_actors):
             y = y_start + i * y_spacing
             elem_id = self.add_actor(root, actor["name"], actor_x, y)
+            element_ids[actor["alias"]] = elem_id
+
+        # Ajouter les acteurs secondaires à droite
+        for i, actor in enumerate(secondary_actors):
+            y = y_start + i * y_spacing
+            elem_id = self.add_secondary_actor(root, actor["name"], secondary_x, y)
             element_ids[actor["alias"]] = elem_id
 
         # Ajouter les cas d'utilisation
