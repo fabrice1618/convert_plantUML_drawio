@@ -192,8 +192,14 @@ class PlantUMLParser:
         actors = []
         usecases = []
         relations = []
+        system_name = None
 
         for line in self.lines:
+            # Cadre du système (rectangle)
+            if line.startswith('rectangle '):
+                match = re.match(r'rectangle\s+"([^"]+)"', line)
+                if match:
+                    system_name = match.group(1)
             # Acteurs
             if line.startswith('actor '):
                 match = re.match(r'actor\s+(?:"([^"]+)"|(\S+))(?:\s+as\s+(\S+))?(?:\s+<<(\w+)>>)?', line)
@@ -244,7 +250,8 @@ class PlantUMLParser:
             "type": DiagramType.USECASE,
             "actors": actors,
             "usecases": usecases,
-            "relations": relations
+            "relations": relations,
+            "system_name": system_name
         }
 
     def _parse_activity(self) -> Dict:
@@ -577,6 +584,7 @@ class DrawIOGenerator:
         actors = data.get("actors", [])
         usecases = data.get("usecases", [])
         relations = data.get("relations", [])
+        system_name = data.get("system_name")
 
         # Séparer les acteurs primaires et secondaires
         primary_actors = [a for a in actors if not a.get("is_secondary")]
@@ -587,9 +595,18 @@ class DrawIOGenerator:
         usecase_x_start = 250
         secondary_x = usecase_x_start + 200  # À droite des use cases
         y_start = 100
-        y_spacing = 120
+        y_spacing = 90
 
         element_ids = {}
+
+        # Ajouter le cadre du système (rectangle englobant les use cases)
+        if system_name and usecases:
+            system_x = usecase_x_start - 30
+            system_y = y_start - 50
+            system_width = 200
+            system_height = len(usecases) * y_spacing + 50
+            system_style = "rounded=0;whiteSpace=wrap;html=1;fillColor=none;strokeColor=#000000;verticalAlign=top;fontStyle=1;"
+            self.add_rectangle(root, system_name, system_x, system_y, system_width, system_height, system_style)
 
         # Ajouter les acteurs primaires à gauche
         for i, actor in enumerate(primary_actors):
