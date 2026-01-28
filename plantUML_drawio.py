@@ -127,11 +127,12 @@ class PlantUMLParser:
         classes = []
         relations = []
         current_class = None
+        in_methods_section = False  # Pour gérer le séparateur --
 
         for line in self.lines:
-            # Déclaration de classe
-            if line.startswith('class ') or line.startswith('interface ') or line.startswith('abstract '):
-                match = re.match(r'(class|interface|abstract\s+class)\s+(\S+)(?:\s+{)?', line)
+            # Déclaration de classe ou enum
+            if line.startswith('class ') or line.startswith('interface ') or line.startswith('abstract ') or line.startswith('enum '):
+                match = re.match(r'(class|interface|abstract\s+class|enum)\s+(\S+)(?:\s+{)?', line)
                 if match:
                     class_type = match.group(1)
                     class_name = match.group(2)
@@ -142,22 +143,39 @@ class PlantUMLParser:
                         "methods": []
                     }
                     classes.append(current_class)
+                    in_methods_section = False
 
-            # Attributs et méthodes (dans un bloc de classe)
+            # Dans un bloc de classe/enum
             elif current_class and line and not line.startswith('}'):
-                if '(' in line and ')' in line:  # Méthode
+                # Séparateur entre attributs et méthodes
+                if line == '--':
+                    in_methods_section = True
+                # Méthode (contient des parenthèses) ou après le séparateur --
+                elif '(' in line and ')' in line:
                     current_class["methods"].append(line)
+                # Attribut (commence par +, -, # ou contient un type)
                 elif line.startswith('+') or line.startswith('-') or line.startswith('#'):
+                    if in_methods_section or ('(' in line and ')' in line):
+                        current_class["methods"].append(line)
+                    else:
+                        current_class["attributes"].append(line)
+                # Valeurs d'enum (lignes simples comme ETUDIANT, ADULTE, etc.)
+                elif current_class["type"] == "enum" and re.match(r'^[A-Z_]+$', line):
                     current_class["attributes"].append(line)
 
             # Fin de bloc de classe
             elif line == '}':
                 current_class = None
+                in_methods_section = False
 
-            # Relations
-            elif any(rel in line for rel in ['--|>', '..|>', '--', '<|--', 'o--', '*--']):
-                # Héritage, implémentation, association, composition, agrégation
-                match = re.match(r'(\S+)\s*(<?(?:--|\.\.|o-|\*-)(?:>|\|>)?)\s*(\S+)(?:\s*:\s*(.*))?', line)
+            # Relations (exclure les notes et autres)
+            elif current_class is None and any(rel in line for rel in ['<|--', '--|>', '..|>', '<|..', '--', 'o--', '*--', '--o', '--*']):
+                # Patterns pour les différentes relations
+                # Héritage: A <|-- B ou A --|> B
+                # Composition: A *-- B ou A --* B
+                # Agrégation: A o-- B ou A --o B
+                # Association: A -- B avec multiplicités optionnelles
+                match = re.match(r'(\S+)\s*(?:"[^"]*")?\s*(<?\|?(?:--|\.\.)(?:o|\*)?>?\|?)\s*(?:"[^"]*")?\s*(\S+)(?:\s*:\s*(.*))?', line)
                 if match:
                     source = match.group(1)
                     rel_type = match.group(2)
@@ -165,11 +183,13 @@ class PlantUMLParser:
                     label = match.group(4) or ""
 
                     # Déterminer le type de relation
-                    if '|>' in rel_type:
-                        rtype = "inheritance" if '--' in rel_type else "implementation"
-                    elif 'o--' in rel_type:
+                    if '<|--' in rel_type or '--|>' in rel_type:
+                        rtype = "inheritance"
+                    elif '<|..' in rel_type or '..|>' in rel_type:
+                        rtype = "implementation"
+                    elif 'o--' in rel_type or '--o' in rel_type:
                         rtype = "aggregation"
-                    elif '*--' in rel_type:
+                    elif '*--' in rel_type or '--*' in rel_type:
                         rtype = "composition"
                     else:
                         rtype = "association"
@@ -493,6 +513,85 @@ class DrawIOGenerator:
 
         return mxfile
 
+    def add_class_box(self, root: ET.Element, cls: Dict, x: int, y: int) -> str:
+        """Ajoute une classe UML avec format HTML (3 compartiments)"""
+        name = cls["name"]
+        class_type = cls.get("type", "class")
+        attributes = cls.get("attributes", [])
+        methods = cls.get("methods", [])
+
+        # Calculer la largeur basée sur le contenu
+        max_text_len = len(name)
+        for attr in attributes:
+            max_text_len = max(max_text_len, len(attr))
+        for method in methods:
+            max_text_len = max(max_text_len, len(method))
+        width = max(160, min(320, max_text_len * 7 + 20))
+
+        # Calculer la hauteur
+        line_height = 18
+        title_lines = 2 if class_type in ["interface", "enum"] else 1
+        title_height = title_lines * 20 + 10
+        attr_height = max(20, len(attributes) * line_height + 10)
+        method_height = max(20, len(methods) * line_height + 10)
+        total_height = title_height + attr_height + method_height
+
+        # ID de la classe
+        class_id = f"class_{self.cell_id}"
+        self.cell_id += 1
+
+        # Construire le contenu HTML
+        html_parts = []
+
+        # Titre (avec stéréotype pour interface/enum)
+        if class_type == "interface":
+            html_parts.append(f'<p style="margin:0px;text-align:center;"><i>&lt;&lt;interface&gt;&gt;</i></p>')
+            html_parts.append(f'<p style="margin:0px;text-align:center;"><b>{name}</b></p>')
+            fill_color = "#fff2cc"
+            stroke_color = "#d6b656"
+        elif class_type == "enum":
+            html_parts.append(f'<p style="margin:0px;text-align:center;">&lt;&lt;enumeration&gt;&gt;</p>')
+            html_parts.append(f'<p style="margin:0px;text-align:center;"><b>{name}</b></p>')
+            fill_color = "#e1d5e7"
+            stroke_color = "#9673a6"
+        else:
+            html_parts.append(f'<p style="margin:0px;text-align:center;"><b>{name}</b></p>')
+            fill_color = "#dae8fc"
+            stroke_color = "#6c8ebf"
+
+        # Séparateur
+        html_parts.append('<hr size="1"/>')
+
+        # Attributs
+        if attributes:
+            for attr in attributes:
+                html_parts.append(f'<p style="margin:0px;margin-left:4px;">{attr}</p>')
+        else:
+            html_parts.append('<p style="margin:0px;">&nbsp;</p>')
+
+        # Séparateur
+        html_parts.append('<hr size="1"/>')
+
+        # Méthodes
+        if methods:
+            for method in methods:
+                html_parts.append(f'<p style="margin:0px;margin-left:4px;">{method}</p>')
+        else:
+            html_parts.append('<p style="margin:0px;">&nbsp;</p>')
+
+        html_content = "".join(html_parts)
+
+        # Style du rectangle
+        style = f"verticalAlign=top;align=left;overflow=fill;html=1;rounded=0;shadow=0;comic=0;labelBackgroundColor=none;strokeColor={stroke_color};strokeWidth=1;fillColor={fill_color};"
+
+        # Créer la cellule
+        cell = ET.SubElement(root, 'mxCell', id=class_id, value=html_content,
+                            style=style, vertex="1", parent="1")
+        ET.SubElement(cell, 'mxGeometry', x=str(x), y=str(y),
+                     width=str(width), height=str(total_height), **{'as': 'geometry'})
+
+        return class_id
+
     def generate_class_diagram(self, data: Dict) -> ET.Element:
         """Génère un diagramme de classes"""
         mxfile, root = self.create_base_structure("Class Diagram")
@@ -500,11 +599,11 @@ class DrawIOGenerator:
         classes = data.get("classes", [])
         relations = data.get("relations", [])
 
-        # Disposition en grille
+        # Disposition en grille - espacement augmenté pour les swimlanes
         x_start = 50
         y_start = 50
-        x_spacing = 250
-        y_spacing = 200
+        x_spacing = 320
+        y_spacing = 250
         cols = 3
 
         class_positions = {}
@@ -515,45 +614,9 @@ class DrawIOGenerator:
             x = x_start + col * x_spacing
             y = y_start + row * y_spacing
 
-            # Construction du contenu de la classe
-            name = cls["name"]
-
-            # Séparateur
-            sep = "&#xa;─────────────&#xa;"
-
-            # Attributs
-            attrs_text = ""
-            if cls.get("attributes"):
-                attrs_text = "&#xa;".join(cls["attributes"])
-
-            # Méthodes
-            methods_text = ""
-            if cls.get("methods"):
-                methods_text = "&#xa;".join(cls["methods"])
-
-            # Assemblage
-            content_parts = [name]
-            if attrs_text:
-                content_parts.append(sep + attrs_text)
-            if methods_text:
-                if not attrs_text:
-                    content_parts.append(sep)
-                content_parts.append(sep + methods_text)
-
-            class_text = "".join(content_parts)
-
-            # Style selon le type
-            if "interface" in cls.get("type", ""):
-                style = "rounded=0;whiteSpace=wrap;html=1;fillColor=#fff2cc;strokeColor=#d6b656;fontStyle=2"
-            else:
-                style = "rounded=0;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;"
-
-            # Calculer la hauteur selon le contenu
-            height = 80 + len(cls.get("attributes", [])) * 20 + len(cls.get("methods", [])) * 20
-
-            elem_id = self.add_rectangle(root, class_text, x, y, 200, height, style)
-            class_positions[name] = elem_id
-            self.elements[name] = elem_id
+            elem_id = self.add_class_box(root, cls, x, y)
+            class_positions[cls["name"]] = elem_id
+            self.elements[cls["name"]] = elem_id
 
         # Ajouter les relations
         for rel in relations:
@@ -567,9 +630,9 @@ class DrawIOGenerator:
                 elif rel["type"] == "implementation":
                     style = "dashed=1;endArrow=block;endFill=0;endSize=12;"
                 elif rel["type"] == "composition":
-                    style = "endArrow=diamond;endFill=1;endSize=12;"
+                    style = "endArrow=diamondThin;endFill=1;endSize=12;"
                 elif rel["type"] == "aggregation":
-                    style = "endArrow=diamond;endFill=0;endSize=12;"
+                    style = "endArrow=diamondThin;endFill=0;endSize=12;"
                 else:
                     style = "endArrow=none;endFill=0;"
 
@@ -700,8 +763,10 @@ class DrawIOGenerator:
         xml_str = ET.tostring(mxfile, encoding='unicode')
         dom = minidom.parseString(xml_str)
         pretty_xml = dom.toprettyxml(indent="  ")
-        # Remplacer le placeholder par l'entité XML pour saut de ligne (après pretty printing)
+        # Remplacer les placeholders par les entités/caractères XML appropriés (après pretty printing)
         pretty_xml = pretty_xml.replace('__NEWLINE__', '&#10;')
+        pretty_xml = pretty_xml.replace('__LT__', '&lt;')
+        pretty_xml = pretty_xml.replace('__GT__', '&gt;')
 
         with open(output_path, 'w', encoding='utf-8') as f:
             f.write(pretty_xml)
