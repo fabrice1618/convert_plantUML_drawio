@@ -1,3 +1,4 @@
 *.png
 *.drawio
 venv/*
+__pycache__/

@@ -314,60 +314,279 @@ class PlantUMLParser:
         """Parse un diagramme d'activité"""
         activities = []
         transitions = []
-        prev_activity = "start"
+        swimlanes = []
+        current_swimlane = None
+
+        # Piles pour gérer les structures imbriquées
+        prev_stack = ["start"]  # Pile des éléments précédents (pour if/else/endif)
+        decision_stack = []  # Pile des décisions en cours
+        fork_stack = []  # Pile des forks en cours
+
+        activity_id = 0
+        fork_id = 0
+        stop_id = 0
+
+        # Accumulateur pour activités multi-lignes
+        multiline_activity = None
 
         for line in self.lines:
+            # Ignorer les lignes vides et commentaires
+            if not line or line.startswith("'") or line.startswith("note") or line.startswith("end note"):
+                continue
+            if line.startswith("legend") or line.startswith("endlegend"):
+                continue
+
+            # Activités multi-lignes: commence par : mais ne finit pas par ;
+            if line.startswith(':') and not line.endswith(';'):
+                multiline_activity = line[1:]  # Enlever le :
+                continue
+
+            # Suite d'une activité multi-ligne
+            if multiline_activity is not None:
+                if line.endswith(';'):
+                    multiline_activity += " " + line[:-1]  # Enlever le ;
+                    line = ':' + multiline_activity + ';'  # Reconstituer la ligne
+                    multiline_activity = None
+                else:
+                    multiline_activity += " " + line
+                    continue
+
+            # Swimlane (partition) - ignorer les lignes de tableau de la légende
+            if line.startswith('|') and line.endswith('|'):
+                swimlane_name = line.strip('|').strip()
+                # Ignorer si c'est une ligne de tableau (contient plusieurs |)
+                if '|' in swimlane_name:
+                    continue
+                if swimlane_name and swimlane_name not in swimlanes:
+                    swimlanes.append(swimlane_name)
+                current_swimlane = swimlane_name
+                continue
+
+            # Point de départ
+            if line == 'start':
+                activities.append({
+                    "id": "start",
+                    "name": "",
+                    "type": "start",
+                    "swimlane": current_swimlane
+                })
+                prev_stack[-1] = "start"
+                continue
+
+            # Point de fin (stop) - utiliser un ID unique pour chaque stop
+            if line == 'stop':
+                stop_name = f"stop_{stop_id}"
+                stop_id += 1
+                branch_depth = len(decision_stack)
+                # Stop: oui = centre, non = droite
+                branch_side = "center"
+                if decision_stack and decision_stack[-1].get("in_else"):
+                    branch_side = "right"
+                activities.append({
+                    "id": stop_name,
+                    "name": "",
+                    "type": "end",
+                    "swimlane": current_swimlane,
+                    "branch_depth": branch_depth,
+                    "branch_side": branch_side
+                })
+                if prev_stack[-1]:
+                    transitions.append({
+                        "source": prev_stack[-1],
+                        "target": stop_name,
+                        "label": ""
+                    })
+                prev_stack[-1] = None  # Pas de suite après un stop
+                continue
+
+            # Activité normale
             if line.startswith(':') and line.endswith(';'):
-                # Activité
                 activity_name = line.strip(':;').strip()
+                act_id = f"act_{activity_id}"
+                activity_id += 1
+                # Déterminer la branche (oui = centre, non = droite)
+                branch_depth = len(decision_stack)
+                branch_side = "center"
+                if decision_stack and decision_stack[-1].get("in_else"):
+                    branch_side = "right"
                 activities.append({
+                    "id": act_id,
                     "name": activity_name,
-                    "type": "activity"
+                    "type": "activity",
+                    "swimlane": current_swimlane,
+                    "branch_depth": branch_depth,
+                    "branch_side": branch_side
                 })
-
-                # Transition depuis l'activité précédente
-                if prev_activity:
+                if prev_stack[-1]:
+                    # Déterminer le label de la transition
+                    trans_label = ""
+                    if decision_stack and prev_stack[-1] == decision_stack[-1]["id"]:
+                        # Première activité après une décision
+                        if decision_stack[-1].get("in_else"):
+                            trans_label = decision_stack[-1].get("no_label", "non")
+                        elif not decision_stack[-1].get("first_transition_done"):
+                            trans_label = decision_stack[-1].get("yes_label", "oui")
+                            decision_stack[-1]["first_transition_done"] = True
                     transitions.append({
-                        "source": prev_activity,
-                        "target": activity_name,
-                        "label": ""
+                        "source": prev_stack[-1],
+                        "target": act_id,
+                        "label": trans_label
                     })
-                prev_activity = activity_name
+                prev_stack[-1] = act_id
+                continue
 
-            elif line.startswith('if ') and line.endswith('then'):
-                # Condition
-                condition = line[3:-4].strip('()')
+            # Condition if
+            match = re.match(r'if\s*\(([^)]+)\)\s*then\s*\(([^)]*)\)', line)
+            if match:
+                condition = match.group(1)
+                yes_label = match.group(2) or "oui"
+                dec_id = f"dec_{activity_id}"
+                activity_id += 1
+                branch_depth = len(decision_stack)  # Niveau d'imbrication
                 activities.append({
+                    "id": dec_id,
                     "name": condition,
-                    "type": "decision"
+                    "type": "decision",
+                    "swimlane": current_swimlane,
+                    "branch_depth": branch_depth,
+                    "branch_side": "center"
                 })
-
-                if prev_activity:
+                if prev_stack[-1]:
                     transitions.append({
-                        "source": prev_activity,
-                        "target": condition,
+                        "source": prev_stack[-1],
+                        "target": dec_id,
                         "label": ""
                     })
-                prev_activity = condition
+                # Sauvegarder le contexte avec les labels
+                decision_stack.append({
+                    "id": dec_id,
+                    "yes_label": yes_label,
+                    "no_label": "non",  # Valeur par défaut
+                    "first_branch_end": None,
+                    "in_else": False,
+                    "depth": branch_depth,
+                    "first_transition_done": False  # Pour marquer la première transition "oui"
+                })
+                prev_stack.append(dec_id)  # Nouvelle branche "oui"
+                continue
 
-            elif line == 'stop':
-                # Fin
+            # Branche else
+            match = re.match(r'else\s*\(([^)]*)\)', line)
+            if match and decision_stack:
+                no_label = match.group(1) or "non"
+                decision_stack[-1]["no_label"] = no_label
+                decision_stack[-1]["first_branch_end"] = prev_stack[-1]
+                decision_stack[-1]["in_else"] = True
+                decision_stack[-1]["first_transition_done"] = False  # Reset pour la branche else
+                prev_stack[-1] = decision_stack[-1]["id"]
+                continue
+
+            # Fin de condition endif
+            if line == 'endif' and decision_stack:
+                decision = decision_stack.pop()
+                # Créer un merge seulement si au moins une branche n'est pas terminée par stop
+                has_yes_continuation = decision["first_branch_end"] is not None
+                has_no_continuation = prev_stack[-1] is not None and prev_stack[-1] != decision["id"]
+
+                if has_yes_continuation or has_no_continuation:
+                    merge_id = f"merge_{activity_id}"
+                    activity_id += 1
+                    activities.append({
+                        "id": merge_id,
+                        "name": "",
+                        "type": "merge",
+                        "swimlane": current_swimlane,
+                        "branch_depth": decision["depth"],
+                        "branch_side": "center"
+                    })
+                    if has_yes_continuation:
+                        transitions.append({
+                            "source": decision["first_branch_end"],
+                            "target": merge_id,
+                            "label": ""
+                        })
+                    if has_no_continuation:
+                        transitions.append({
+                            "source": prev_stack[-1],
+                            "target": merge_id,
+                            "label": ""
+                        })
+                    elif prev_stack[-1] == decision["id"]:
+                        # Branche else vide
+                        transitions.append({
+                            "source": decision["id"],
+                            "target": merge_id,
+                            "label": decision["no_label"]
+                        })
+                    prev_stack.pop()
+                    prev_stack[-1] = merge_id
+                else:
+                    # Les deux branches se terminent par stop, pas de merge
+                    prev_stack.pop()
+                    # prev_stack[-1] reste None ou la valeur précédente
+                continue
+
+            # Fork (début de parallélisme)
+            if line == 'fork':
+                fork_name = f"fork_{fork_id}"
+                fork_id += 1
                 activities.append({
-                    "name": "stop",
-                    "type": "end"
+                    "id": fork_name,
+                    "name": "",
+                    "type": "fork",
+                    "swimlane": current_swimlane
                 })
-
-                if prev_activity:
+                if prev_stack[-1]:
                     transitions.append({
-                        "source": prev_activity,
-                        "target": "stop",
+                        "source": prev_stack[-1],
+                        "target": fork_name,
                         "label": ""
                     })
+                fork_stack.append({
+                    "id": fork_name,
+                    "branches": []
+                })
+                prev_stack[-1] = fork_name
+                continue
+
+            # Fork again (nouvelle branche parallèle)
+            if line == 'fork again' and fork_stack:
+                # Sauvegarder la fin de la branche courante
+                fork_stack[-1]["branches"].append(prev_stack[-1])
+                # Revenir au fork pour nouvelle branche
+                prev_stack[-1] = fork_stack[-1]["id"]
+                continue
+
+            # End fork (fin de parallélisme)
+            if line == 'end fork' and fork_stack:
+                fork = fork_stack.pop()
+                # Sauvegarder la dernière branche
+                fork["branches"].append(prev_stack[-1])
+                # Point de jonction (join)
+                join_name = f"join_{fork_id}"
+                fork_id += 1
+                activities.append({
+                    "id": join_name,
+                    "name": "",
+                    "type": "join",
+                    "swimlane": current_swimlane
+                })
+                # Transitions depuis toutes les branches
+                for branch_end in fork["branches"]:
+                    if branch_end:
+                        transitions.append({
+                            "source": branch_end,
+                            "target": join_name,
+                            "label": ""
+                        })
+                prev_stack[-1] = join_name
+                continue
 
         return {
             "type": DiagramType.ACTIVITY,
             "activities": activities,
-            "transitions": transitions
+            "transitions": transitions,
+            "swimlanes": swimlanes
         }
 
 
@@ -845,52 +1064,142 @@ class DrawIOGenerator:
         return mxfile
 
     def generate_activity_diagram(self, data: Dict) -> ET.Element:
-        """Génère un diagramme d'activité"""
+        """Génère un diagramme d'activité avec positionnement intelligent des branches"""
         mxfile, root = self.create_base_structure("Activity Diagram")
 
         activities = data.get("activities", [])
         transitions = data.get("transitions", [])
+        swimlanes = data.get("swimlanes", [])
 
-        # Disposition verticale
-        x_center = 300
+        # Configuration de base
+        x_center = 400
         y_start = 100
-        y_spacing = 100
+        y_spacing = 80
+        branch_offset = 150  # Décalage horizontal pour les branches
+        swimlane_width = 300
 
-        element_ids = {}
+        # Construire un graphe des connexions pour analyser la structure
+        # et calculer les positions optimales
+        incoming = {}  # Pour chaque nœud, liste des sources
+        outgoing = {}  # Pour chaque nœud, liste des cibles
+        for trans in transitions:
+            src, tgt = trans["source"], trans["target"]
+            outgoing.setdefault(src, []).append(tgt)
+            incoming.setdefault(tgt, []).append(src)
 
-        # Ajouter le point de départ
-        start_style = "ellipse;whiteSpace=wrap;html=1;aspect=fixed;fillColor=#000000;"
-        start_id = self.add_ellipse(root, "", x_center - 15, y_start - 50, 30, 30, start_style)
-        element_ids["start"] = start_id
+        # Créer un mapping id -> activity pour accès rapide
+        activity_map = {a.get("id", a["name"]): a for a in activities}
 
-        # Ajouter les activités
-        for i, activity in enumerate(activities):
-            y = y_start + i * y_spacing
+        # Si des swimlanes sont définies, ajuster le layout
+        swimlane_x = {}
+        if swimlanes:
+            total_height = y_start + len(activities) * y_spacing + 200
+            header_height = 30
+            for i, lane in enumerate(swimlanes):
+                lane_x = 50 + i * swimlane_width
+                swimlane_x[lane] = lane_x + swimlane_width // 2
+                header_style = "swimlane;whiteSpace=wrap;html=1;fillColor=#f5f5f5;strokeColor=#666666;fontStyle=1;startSize=30;horizontal=1;"
+                self.add_rectangle(root, lane, lane_x, 50, swimlane_width, total_height, header_style)
+            y_start += header_height
+
+        # Calculer les positions de chaque élément
+        element_positions = {}  # id -> (x, y)
+        element_ids = {}  # id -> draw.io cell id
+
+        # Parcours du graphe pour positionner les éléments
+        visited = set()
+        y_pos = y_start
+        x_offset_stack = [0]  # Pile des décalages X pour les branches
+
+        def get_base_x(activity):
+            """Retourne la position X de base selon la swimlane"""
+            swimlane = activity.get("swimlane")
+            if swimlane and swimlane in swimlane_x:
+                return swimlane_x[swimlane]
+            return x_center
+
+        # Positionner les éléments en suivant l'ordre et en gérant les branches
+        for activity in activities:
+            act_id = activity.get("id", activity["name"])
+            act_type = activity["type"]
             name = activity["name"]
 
-            if activity["type"] == "decision":
-                # Losange pour les décisions
-                style = "rhombus;whiteSpace=wrap;html=1;fillColor=#fff2cc;strokeColor=#d6b656;"
-                elem_id = self.add_rectangle(root, name, x_center - 60, y, 120, 80, style)
-            elif activity["type"] == "end":
-                # Point final
+            if act_id in visited:
+                continue
+            visited.add(act_id)
+
+            # Position X de base (swimlane ou centre)
+            base_x = get_base_x(activity)
+
+            # Appliquer le décalage selon la branche
+            # - "center" (flux oui/then) = tout droit
+            # - "right" (flux non/else) = décalé vers la droite (mais reste dans la swimlane)
+            branch_side = activity.get("branch_side", "center")
+
+            # Décalage limité pour rester dans la swimlane (max 60px)
+            max_offset = 60
+
+            if branch_side == "right":
+                x = base_x + max_offset
+            else:
+                x = base_x  # center = tout droit, aligné au centre de la swimlane
+
+            # Stocker la position
+            element_positions[act_id] = (x, y_pos)
+
+            # Créer l'élément visuel selon le type
+            if act_type == "start":
                 style = "ellipse;whiteSpace=wrap;html=1;aspect=fixed;fillColor=#000000;"
-                elem_id = self.add_ellipse(root, "", x_center - 15, y, 30, 30, style)
+                elem_id = self.add_ellipse(root, "", x - 15, y_pos, 30, 30, style)
+                y_pos += 50
+
+            elif act_type == "end":
+                style = "ellipse;whiteSpace=wrap;html=1;aspect=fixed;fillColor=#000000;strokeColor=#000000;strokeWidth=3;"
+                elem_id = self.add_ellipse(root, "", x - 15, y_pos, 30, 30, style)
+                # Ne pas incrémenter y_pos après un end pour éviter les espaces vides
+                # Le prochain élément sera sur une autre branche
+
+            elif act_type == "decision":
+                style = "rhombus;whiteSpace=wrap;html=1;fillColor=#fff2cc;strokeColor=#d6b656;"
+                width = max(100, len(name) * 6 + 20)
+                elem_id = self.add_rectangle(root, name, x - width//2, y_pos, width, 60, style)
+                y_pos += y_spacing
+
+            elif act_type == "merge":
+                # Point de fusion - petit losange
+                style = "rhombus;whiteSpace=wrap;html=1;fillColor=#fff2cc;strokeColor=#d6b656;"
+                elem_id = self.add_rectangle(root, "", x - 15, y_pos, 30, 30, style)
+                y_pos += 50
+
+            elif act_type == "fork":
+                style = "rounded=0;whiteSpace=wrap;html=1;fillColor=#000000;strokeColor=#000000;"
+                elem_id = self.add_rectangle(root, "", x - 80, y_pos, 160, 8, style)
+                y_pos += 50
+
+            elif act_type == "join":
+                style = "rounded=0;whiteSpace=wrap;html=1;fillColor=#000000;strokeColor=#000000;"
+                elem_id = self.add_rectangle(root, "", x - 80, y_pos, 160, 8, style)
+                y_pos += 50
+
             else:
                 # Activité normale
                 style = "rounded=1;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;"
-                elem_id = self.add_rectangle(root, name, x_center - 80, y, 160, 60, style)
+                width = max(140, min(220, len(name) * 7 + 20))
+                elem_id = self.add_rectangle(root, name, x - width // 2, y_pos, width, 50, style)
+                y_pos += y_spacing
 
-            element_ids[name] = elem_id
+            element_ids[act_id] = elem_id
 
-        # Ajouter les transitions
+        # Ajouter les transitions avec des styles appropriés
         for trans in transitions:
             source_id = element_ids.get(trans["source"])
             target_id = element_ids.get(trans["target"])
 
             if source_id and target_id:
-                style = "endArrow=block;endFill=1;"
-                self.add_arrow(root, source_id, target_id, trans.get("label", ""), style)
+                label = trans.get("label", "")
+                # Style avec routage courbé pour les connexions non directes
+                style = "endArrow=block;endFill=1;rounded=1;edgeStyle=orthogonalEdgeStyle;"
+                self.add_arrow(root, source_id, target_id, label, style)
 
         return mxfile
 
