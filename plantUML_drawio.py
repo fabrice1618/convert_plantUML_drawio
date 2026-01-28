@@ -83,21 +83,54 @@ class PlantUMLParser:
         """Parse un diagramme de séquence"""
         participants = []
         messages = []
+        fragments = []  # Fragments combinés (alt, opt, loop, etc.)
+        fragment_stack = []  # Pile pour gérer les fragments imbriqués
+        message_index = 0  # Index du message pour positionner les fragments
 
         for line in self.lines:
-            # Participants
-            if line.startswith('participant') or line.startswith('actor'):
-                match = re.match(r'(participant|actor)\s+(?:"([^"]+)"|(\S+))(?:\s+as\s+(\S+))?', line)
-                if match:
-                    name = match.group(2) or match.group(3)
-                    alias = match.group(4) or name
-                    ptype = match.group(1)
-                    participants.append({"name": name, "alias": alias, "type": ptype})
+            # Participants (participant, actor, database, boundary, control, entity, collections)
+            participant_match = re.match(r'(participant|actor|database|boundary|control|entity|collections)\s+(?:"([^"]+)"|(\S+))(?:\s+as\s+(\S+))?', line)
+            if participant_match:
+                ptype = participant_match.group(1)
+                name = participant_match.group(2) or participant_match.group(3)
+                alias = participant_match.group(4) or name
+                # Convertir \n en placeholder pour saut de ligne
+                name = name.replace('\\n', '__NEWLINE__')
+                participants.append({"name": name, "alias": alias, "type": ptype})
 
-            # Messages
-            elif '->' in line or '-->' in line or '<-' in line or '<--' in line:
-                # Support plusieurs formats: A -> B: message, A -> B : message, etc.
-                match = re.match(r'(\S+)\s*(<?-+>?)\s*(\S+)\s*:?\s*(.*)', line)
+            # Fragments combinés : alt, opt, loop, par, break, critical
+            elif re.match(r'^(alt|opt|loop|par|break|critical)\s+', line):
+                match = re.match(r'^(alt|opt|loop|par|break|critical)\s+(.*)', line)
+                if match:
+                    fragment = {
+                        "type": match.group(1),
+                        "label": match.group(2),
+                        "start_index": message_index,
+                        "sections": [{"label": match.group(2), "start_index": message_index}],
+                        "end_index": None
+                    }
+                    fragment_stack.append(fragment)
+
+            # Section else dans un fragment alt
+            elif line.startswith('else'):
+                if fragment_stack:
+                    label = line[4:].strip() if len(line) > 4 else ""
+                    fragment_stack[-1]["sections"].append({
+                        "label": label,
+                        "start_index": message_index
+                    })
+
+            # Fin de fragment
+            elif line == 'end':
+                if fragment_stack:
+                    fragment = fragment_stack.pop()
+                    fragment["end_index"] = message_index
+                    fragments.append(fragment)
+
+            # Messages (ignorer les lignes de commentaire et notes)
+            elif '->' in line and not line.startswith("'") and not line.startswith('note'):
+                # Détecter le type de flèche : ->, -->, ->>, ->>
+                match = re.match(r'(\S+)\s*(<?-+>>?)\s*(\S+)\s*:?\s*(.*)', line)
                 if match:
                     source = match.group(1)
                     arrow = match.group(2)
@@ -105,8 +138,9 @@ class PlantUMLParser:
                     label = match.group(4).strip()
 
                     # Déterminer le type de message
-                    is_return = arrow.startswith('<') or '-->' in arrow
-                    is_async = '-->' in arrow or '<--' in arrow
+                    is_dashed = '--' in arrow
+                    is_async = '>>' in arrow
+                    is_return = is_dashed and not is_async
 
                     messages.append({
                         "source": source,
@@ -115,11 +149,13 @@ class PlantUMLParser:
                         "is_return": is_return,
                         "is_async": is_async
                     })
+                    message_index += 1
 
         return {
             "type": DiagramType.SEQUENCE,
             "participants": participants,
-            "messages": messages
+            "messages": messages,
+            "fragments": fragments
         }
 
     def _parse_class(self) -> Dict:
@@ -443,12 +479,62 @@ class DrawIOGenerator:
 
         return arrow_id
 
+    def add_fragment(self, root: ET.Element, fragment_type: str, x: int, y: int,
+                    width: int, height: int, sections: List[Dict], y_positions: List[int]) -> str:
+        """Ajoute un fragment combiné (alt, opt, loop, etc.)"""
+        fragment_id = f"fragment_{self.cell_id}"
+        self.cell_id += 1
+
+        # Rectangle principal du fragment
+        style = "rounded=0;whiteSpace=wrap;html=1;fillColor=none;strokeColor=#666666;dashed=0;verticalAlign=top;align=left;spacingLeft=5;spacingTop=2;"
+        cell = ET.SubElement(root, 'mxCell', id=fragment_id, value=f"<b>{fragment_type}</b>",
+                           style=style, vertex="1", parent="1")
+        ET.SubElement(cell, 'mxGeometry', x=str(x), y=str(y),
+                     width=str(width), height=str(height), **{'as': 'geometry'})
+
+        # Petit rectangle pour le label du type (pentagone simplifié)
+        label_id = f"label_{self.cell_id}"
+        self.cell_id += 1
+        label_style = "rounded=0;whiteSpace=wrap;html=1;fillColor=#f5f5f5;strokeColor=#666666;fontStyle=1;fontSize=10;"
+        label_cell = ET.SubElement(root, 'mxCell', id=label_id, value=fragment_type,
+                                  style=label_style, vertex="1", parent="1")
+        ET.SubElement(label_cell, 'mxGeometry', x=str(x), y=str(y),
+                     width="40", height="20", **{'as': 'geometry'})
+
+        # Lignes de séparation et labels pour chaque section (sauf la première)
+        for i, section in enumerate(sections[1:], 1):
+            if i < len(y_positions):
+                sep_y = y_positions[i]
+                # Ligne pointillée de séparation
+                sep_id = f"sep_{self.cell_id}"
+                self.cell_id += 1
+                sep_style = "endArrow=none;dashed=1;html=1;dashPattern=8 8;strokeColor=#666666;"
+                sep_cell = ET.SubElement(root, 'mxCell', id=sep_id, value="",
+                                        style=sep_style, edge="1", parent="1")
+                sep_geom = ET.SubElement(sep_cell, 'mxGeometry', relative="1", **{'as': 'geometry'})
+                ET.SubElement(sep_geom, 'mxPoint', x=str(x), y=str(sep_y), **{'as': 'sourcePoint'})
+                ET.SubElement(sep_geom, 'mxPoint', x=str(x + width), y=str(sep_y), **{'as': 'targetPoint'})
+
+                # Label de la section (ex: "[else]")
+                if section.get("label"):
+                    section_label_id = f"section_label_{self.cell_id}"
+                    self.cell_id += 1
+                    section_style = "text;html=1;strokeColor=none;fillColor=none;align=left;verticalAlign=middle;fontSize=10;"
+                    section_cell = ET.SubElement(root, 'mxCell', id=section_label_id,
+                                                value=f"[{section['label']}]",
+                                                style=section_style, vertex="1", parent="1")
+                    ET.SubElement(section_cell, 'mxGeometry', x=str(x + 5), y=str(sep_y + 2),
+                                 width="150", height="20", **{'as': 'geometry'})
+
+        return fragment_id
+
     def generate_sequence_diagram(self, data: Dict) -> ET.Element:
         """Génère un diagramme de séquence"""
         mxfile, root = self.create_base_structure("Sequence Diagram")
 
         participants = data.get("participants", [])
         messages = data.get("messages", [])
+        fragments = data.get("fragments", [])
 
         # Si pas de participants explicites, les extraire des messages
         if not participants:
@@ -461,55 +547,105 @@ class DrawIOGenerator:
 
         # Placer les participants
         x_start = 50
-        x_spacing = 180
-        y_start = 100
+        x_spacing = 200  # Augmenté pour les noms longs
+        y_start = 50
+        participant_width = 140
+        participant_height = 50
+        y_spacing = 50
+        messages_start_y = y_start + participant_height + 80
+
+        # Calculer la hauteur totale pour les lignes de vie
+        lifeline_end_y = messages_start_y + len(messages) * y_spacing + 50
 
         participant_positions = {}
+        participant_x_positions = []  # Pour calculer la largeur des fragments
+
         for i, participant in enumerate(participants):
             x = x_start + i * x_spacing
             name = participant["name"]
+            ptype = participant["type"]
+            center_x = x + participant_width // 2
+            participant_x_positions.append(center_x)
 
-            if participant["type"] == "actor":
-                elem_id = self.add_actor(root, name, x, y_start)
+            if ptype == "actor":
+                elem_id = self.add_actor(root, name, x + participant_width // 2 - 15, y_start)
+                lifeline_top_y = y_start + 60  # Sous l'acteur
+            elif ptype == "database":
+                # Style cylindre pour database
+                style = "shape=cylinder3;whiteSpace=wrap;html=1;boundedLbl=1;backgroundOutline=1;size=15;fillColor=#dae8fc;strokeColor=#6c8ebf;"
+                elem_id = self.add_rectangle(root, name, x, y_start, participant_width, participant_height + 10, style)
+                lifeline_top_y = y_start + participant_height + 10
             else:
+                # participant, boundary, control, entity, collections
                 style = "rounded=0;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;"
-                elem_id = self.add_rectangle(root, name, x, y_start, 120, 40, style)
+                elem_id = self.add_rectangle(root, name, x, y_start, participant_width, participant_height, style)
+                lifeline_top_y = y_start + participant_height
 
-            # Ligne de vie
+            # Ligne de vie (ligne verticale pointillée)
             lifeline_id = f"lifeline_{self.cell_id}"
             self.cell_id += 1
+            lifeline_style = "endArrow=none;dashed=1;html=1;dashPattern=1 4;strokeWidth=1;strokeColor=#666666;"
             cell = ET.SubElement(root, 'mxCell', id=lifeline_id, value="",
-                               style="dashed=1;html=1;strokeColor=#666666;",
-                               edge="1", parent="1", source=elem_id)
+                               style=lifeline_style, edge="1", parent="1")
             geom = ET.SubElement(cell, 'mxGeometry', relative="1", **{'as': 'geometry'})
-            points = ET.SubElement(geom, 'Array', **{'as': 'points'})
-            ET.SubElement(points, 'mxPoint', x=str(x + 60), y="700")
+            ET.SubElement(geom, 'mxPoint', x=str(center_x), y=str(lifeline_top_y), **{'as': 'sourcePoint'})
+            ET.SubElement(geom, 'mxPoint', x=str(center_x), y=str(lifeline_end_y), **{'as': 'targetPoint'})
 
-            participant_positions[participant["alias"]] = (x + 60, y_start + 40)
+            participant_positions[participant["alias"]] = (center_x, lifeline_top_y)
             self.elements[participant["alias"]] = elem_id
 
-        # Ajouter les messages
-        y_pos = y_start + 100
-        y_spacing = 50
-
+        # Calculer les positions Y de chaque message (pour les fragments)
+        message_y_positions = []
+        y_pos = messages_start_y
         for msg in messages:
+            message_y_positions.append(y_pos)
+            y_pos += y_spacing
+
+        # Ajouter les fragments combinés (en arrière-plan, donc d'abord)
+        if participant_x_positions:
+            fragment_x = min(participant_x_positions) - 60
+            fragment_width = max(participant_x_positions) - min(participant_x_positions) + 120
+
+            for fragment in fragments:
+                start_idx = fragment["start_index"]
+                end_idx = fragment["end_index"]
+
+                if start_idx < len(message_y_positions):
+                    frag_y = message_y_positions[start_idx] - 25
+                    if end_idx < len(message_y_positions):
+                        frag_height = message_y_positions[end_idx] - frag_y + 25
+                    else:
+                        frag_height = (len(message_y_positions) - start_idx) * y_spacing + 25
+
+                    # Calculer les positions Y des sections
+                    section_y_positions = [frag_y]
+                    for section in fragment["sections"][1:]:
+                        if section["start_index"] < len(message_y_positions):
+                            section_y_positions.append(message_y_positions[section["start_index"]] - 10)
+
+                    self.add_fragment(root, fragment["type"], fragment_x, frag_y,
+                                     fragment_width, frag_height, fragment["sections"], section_y_positions)
+
+        # Ajouter les messages
+        for i, msg in enumerate(messages):
             source_pos = participant_positions.get(msg["source"])
             target_pos = participant_positions.get(msg["target"])
 
             if source_pos and target_pos:
+                y_pos = message_y_positions[i]
+
                 # Style selon le type de message
                 if msg.get("is_return"):
-                    style = "dashed=1;endArrow=open;endFill=0;"
+                    style = "dashed=1;html=1;endArrow=open;endFill=0;strokeColor=#666666;"
                 elif msg.get("is_async"):
-                    style = "endArrow=open;endFill=0;"
+                    style = "html=1;endArrow=async;endFill=0;"
                 else:
-                    style = "endArrow=block;endFill=1;"
+                    style = "html=1;endArrow=block;endFill=1;"
 
                 self.add_arrow_with_points(root, msg["label"],
                                           source_pos[0], y_pos,
                                           target_pos[0], y_pos,
                                           style)
-                y_pos += y_spacing
 
         return mxfile
 
