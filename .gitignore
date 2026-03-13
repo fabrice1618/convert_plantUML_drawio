@@ -2,3 +2,4 @@
 *.drawio
 venv/*
 __pycache__/
+axel.puml

@@ -47,6 +47,9 @@ class PlantUMLParser:
         # Diagramme de classes
         elif any(keyword in content_lower for keyword in ['class ', 'interface ', 'abstract class', 'extends', 'implements']):
             return DiagramType.CLASS
+        # Diagramme de composants / déploiement (avant séquence car peut contenir actor et ->)
+        elif any(keyword in content_lower for keyword in ['node ', 'component ']):
+            return DiagramType.COMPONENT
         # Diagramme de séquence (avant activité car partage certains mots-clés)
         elif 'participant' in content_lower or ('actor' in content_lower and '->' in content_lower):
             return DiagramType.SEQUENCE
@@ -57,9 +60,6 @@ class PlantUMLParser:
         # Diagramme d'état
         elif any(keyword in content_lower for keyword in ['state ', '[*]']):
             return DiagramType.STATE
-        # Diagramme de composants
-        elif any(keyword in content_lower for keyword in ['component', 'package', 'node']):
-            return DiagramType.COMPONENT
         # Messages de séquence simples
         elif any(keyword in content_lower for keyword in ['->', '<-', 'activate', 'deactivate']):
             return DiagramType.SEQUENCE
@@ -76,6 +76,8 @@ class PlantUMLParser:
             return self._parse_usecase()
         elif self.diagram_type == DiagramType.ACTIVITY:
             return self._parse_activity()
+        elif self.diagram_type == DiagramType.COMPONENT:
+            return self._parse_component()
         else:
             raise ValueError(f"Type de diagramme non supporté: {self.diagram_type}")
 
@@ -589,6 +591,90 @@ class PlantUMLParser:
             "swimlanes": swimlanes
         }
 
+    def _parse_component(self) -> Dict:
+        """Parse un diagramme de composants / déploiement"""
+        root_elements = []
+        element_map = {}  # alias -> element dict
+        connections = []
+        parent_stack = [root_elements]  # pile des listes children courantes
+        auto_id = 0
+
+        # Regex pour les déclarations d'éléments
+        elem_with_brace_re = re.compile(
+            r'^(node|package|component|database|cloud)\s+"([^"]+)"(?:\s+as\s+(\w+))?\s*\{')
+        elem_leaf_re = re.compile(
+            r'^(node|package|component|database|cloud|actor)\s+"([^"]+)"(?:\s+as\s+(\w+))?\s*$')
+        # Connexions: alias1 -dir-> alias2 : label  ou  alias1 .dir.> alias2 : label
+        conn_re = re.compile(
+            r'^(\w+)\s+([-.][-.a-z]*>)\s+(\w+)(?:\s*:\s*(.+))?$')
+
+        for line in self.lines:
+            # Ignorer les lignes non pertinentes
+            if not line or line.startswith('@') or line.startswith("'") or \
+               line.startswith('skinparam') or line.startswith('!'):
+                continue
+
+            # Fermeture de bloc
+            if line == '}':
+                if len(parent_stack) > 1:
+                    parent_stack.pop()
+                continue
+
+            # Élément avec accolade ouvrante (conteneur)
+            m = elem_with_brace_re.match(line)
+            if m:
+                kind, name, alias = m.group(1), m.group(2), m.group(3)
+                if not alias:
+                    auto_id += 1
+                    alias = f"_auto_{auto_id}"
+                label = name.replace('\\n', '__NEWLINE__')
+                elem = {"id": alias, "name": label, "kind": kind, "children": []}
+                parent_stack[-1].append(elem)
+                element_map[alias] = elem
+                parent_stack.append(elem["children"])
+                continue
+
+            # Élément feuille (sans accolade)
+            m = elem_leaf_re.match(line)
+            if m:
+                kind, name, alias = m.group(1), m.group(2), m.group(3)
+                if not alias:
+                    auto_id += 1
+                    alias = f"_auto_{auto_id}"
+                label = name.replace('\\n', '__NEWLINE__')
+                elem = {"id": alias, "name": label, "kind": kind, "children": []}
+                parent_stack[-1].append(elem)
+                element_map[alias] = elem
+                continue
+
+            # Connexion
+            m = conn_re.match(line)
+            if m:
+                source, arrow, target, label = m.group(1), m.group(2), m.group(3), m.group(4) or ""
+                # Déterminer le style de ligne
+                line_style = "dotted" if arrow.startswith('.') else "solid"
+                # Déterminer la direction
+                direction = "none"
+                for d in ["up", "down", "left", "right"]:
+                    if d in arrow:
+                        direction = d
+                        break
+                connections.append({
+                    "source": source,
+                    "target": target,
+                    "label": label.strip(),
+                    "line_style": line_style,
+                    "direction": direction
+                })
+                continue
+
+        return {
+            "type": DiagramType.COMPONENT,
+            "elements": root_elements,
+            "connections": connections,
+            "element_map": element_map
+        }
+
 
 class DrawIOGenerator:
     """Génère des fichiers Draw.io à partir de données parsées"""
@@ -746,6 +832,196 @@ class DrawIOGenerator:
                                  width="150", height="20", **{'as': 'geometry'})
 
         return fragment_id
+
+    def add_cell(self, root: ET.Element, label: str, x: int, y: int,
+                 width: int, height: int, style: str, parent_id: str = "1") -> str:
+        """Ajoute une cellule avec parent configurable (pour conteneurs imbriqués)"""
+        elem_id = f"elem_{self.cell_id}"
+        self.cell_id += 1
+        cell = ET.SubElement(root, 'mxCell', id=elem_id, value=label,
+                             style=style, vertex="1", parent=parent_id)
+        ET.SubElement(cell, 'mxGeometry', x=str(x), y=str(y),
+                      width=str(width), height=str(height), **{'as': 'geometry'})
+        return elem_id
+
+    # --- Styles Draw.io par type d'élément de déploiement ---
+    COMPONENT_STYLES = {
+        "node": "rounded=0;whiteSpace=wrap;html=1;fillColor=#f5f5f5;strokeColor=#666666;"
+                "verticalAlign=top;fontStyle=1;container=1;collapsible=0;",
+        "package": "shape=folder;fontStyle=1;tabWidth=110;tabHeight=20;tabPosition=left;"
+                   "whiteSpace=wrap;html=1;container=1;collapsible=0;"
+                   "fillColor=#fff2cc;strokeColor=#d6b656;verticalAlign=top;",
+        "component": "shape=component;align=left;spacingLeft=36;whiteSpace=wrap;html=1;"
+                     "fillColor=#dae8fc;strokeColor=#6c8ebf;",
+        "database": "shape=cylinder3;whiteSpace=wrap;html=1;size=15;"
+                    "fillColor=#e1d5e7;strokeColor=#9673a6;",
+        "cloud": "ellipse;shape=cloud;whiteSpace=wrap;html=1;"
+                 "fillColor=#f8cecc;strokeColor=#b85450;",
+        "actor": "shape=umlActor;verticalLabelPosition=bottom;verticalAlign=top;html=1;",
+    }
+
+    # Tailles par défaut pour les éléments feuilles
+    COMPONENT_SIZES = {
+        "node": (160, 60),
+        "package": (200, 60),
+        "component": (180, 50),
+        "database": (100, 80),
+        "cloud": (160, 80),
+        "actor": (40, 70),
+    }
+
+    def _compute_component_size(self, elem: Dict) -> Tuple[int, int]:
+        """Calcule récursivement la taille d'un élément et positionne ses enfants"""
+        children = elem.get("children", [])
+        if not children:
+            # Feuille : taille par défaut adaptée au label
+            w, h = self.COMPONENT_SIZES.get(elem["kind"], (160, 50))
+            label_len = len(elem["name"].replace('__NEWLINE__', ''))
+            w = max(w, label_len * 7 + 30)
+            elem["width"] = w
+            elem["height"] = h
+            return w, h
+
+        # Conteneur : calculer les tailles enfants d'abord
+        pad_top, pad_side, pad_bottom = 40, 20, 20
+        child_spacing = 25
+
+        child_sizes = []
+        for child in children:
+            cw, ch = self._compute_component_size(child)
+            child_sizes.append((cw, ch))
+
+        # Séparer les gros enfants (conteneurs) et petits (feuilles)
+        has_containers = any(c.get("children") for c in children)
+
+        if has_containers:
+            # Disposition verticale pour les conteneurs (empilés)
+            max_w = max(s[0] for s in child_sizes)
+            cy = pad_top
+            for i, child in enumerate(children):
+                child["rel_x"] = pad_side
+                child["rel_y"] = cy
+                cy += child_sizes[i][1] + child_spacing
+            container_w = max_w + 2 * pad_side
+            container_h = cy - child_spacing + pad_bottom
+        elif len(children) <= 3:
+            # Peu d'enfants feuilles : horizontal
+            total_w = sum(s[0] for s in child_sizes) + child_spacing * (len(children) - 1)
+            max_h = max(s[1] for s in child_sizes)
+            cx = pad_side
+            for i, child in enumerate(children):
+                child["rel_x"] = cx
+                child["rel_y"] = pad_top
+                cx += child_sizes[i][0] + child_spacing
+            container_w = total_w + 2 * pad_side
+            container_h = max_h + pad_top + pad_bottom
+        else:
+            # Grille 2 colonnes pour beaucoup de feuilles
+            cols = 2
+            rows_data = []
+            for i in range(0, len(children), cols):
+                row = child_sizes[i:i + cols]
+                rows_data.append(row)
+            max_col_w = [0] * cols
+            for row in rows_data:
+                for j, (w, h) in enumerate(row):
+                    max_col_w[j] = max(max_col_w[j], w)
+            cy = pad_top
+            idx = 0
+            for row in rows_data:
+                row_h = max(h for _, h in row)
+                cx = pad_side
+                for j, (w, h) in enumerate(row):
+                    children[idx]["rel_x"] = cx
+                    children[idx]["rel_y"] = cy
+                    cx += max_col_w[j] + child_spacing
+                    idx += 1
+                cy += row_h + child_spacing
+            container_w = sum(max_col_w) + child_spacing * (cols - 1) + 2 * pad_side
+            container_h = cy - child_spacing + pad_bottom
+
+        # Taille minimale du label
+        label_len = len(elem["name"].replace('__NEWLINE__', ''))
+        container_w = max(container_w, label_len * 7 + 40)
+        container_h = max(container_h, 80)
+
+        elem["width"] = container_w
+        elem["height"] = container_h
+        return container_w, container_h
+
+    def _render_component_element(self, root: ET.Element, elem: Dict,
+                                  parent_id: str, element_ids: Dict) -> str:
+        """Rend récursivement un élément et ses enfants"""
+        kind = elem["kind"]
+        style = self.COMPONENT_STYLES.get(kind, self.COMPONENT_STYLES["node"])
+        x = elem.get("rel_x", 0)
+        y = elem.get("rel_y", 0)
+        w = elem["width"]
+        h = elem["height"]
+
+        elem_id = self.add_cell(root, elem["name"], x, y, w, h, style, parent_id)
+        element_ids[elem["id"]] = elem_id
+
+        # Rendre les enfants (coordonnées relatives au conteneur parent)
+        for child in elem.get("children", []):
+            self._render_component_element(root, child, elem_id, element_ids)
+
+        return elem_id
+
+    def generate_component_diagram(self, data: Dict) -> ET.Element:
+        """Génère un diagramme de composants / déploiement"""
+        mxfile, root = self.create_base_structure("Component Diagram")
+
+        elements = data.get("elements", [])
+        connections = data.get("connections", [])
+
+        # Passe 1 : calculer les tailles bottom-up
+        for elem in elements:
+            self._compute_component_size(elem)
+
+        # Passe 2 : positionner les éléments racine sur le canvas
+        # Trouver le plus grand élément (conteneur principal) et les petits éléments
+        main_elements = [e for e in elements if e.get("children")]
+        standalone_elements = [e for e in elements if not e.get("children")]
+
+        y_cursor = 50
+        for elem in main_elements:
+            elem["rel_x"] = 50
+            elem["rel_y"] = y_cursor
+            y_cursor += elem["height"] + 40
+
+        # Positionner les éléments standalone à droite du conteneur principal
+        if main_elements:
+            standalone_x = 50 + max(e["width"] for e in main_elements) + 60
+        else:
+            standalone_x = 50
+        standalone_y = 50
+        for elem in standalone_elements:
+            elem["rel_x"] = standalone_x
+            elem["rel_y"] = standalone_y
+            standalone_y += elem["height"] + 50
+
+        # Passe 3 : rendre tous les éléments
+        element_ids = {}
+        for elem in elements:
+            self._render_component_element(root, elem, "1", element_ids)
+
+        # Passe 4 : rendre les connexions
+        for conn in connections:
+            source_id = element_ids.get(conn["source"])
+            target_id = element_ids.get(conn["target"])
+            if not source_id or not target_id:
+                continue
+
+            if conn["line_style"] == "dotted":
+                style = "dashed=1;endArrow=open;endFill=0;"
+            else:
+                style = "endArrow=block;endFill=1;"
+
+            label = conn.get("label", "")
+            self.add_arrow(root, source_id, target_id, label, style)
+
+        return mxfile
 
     def generate_sequence_diagram(self, data: Dict) -> ET.Element:
         """Génère un diagramme de séquence"""
@@ -1248,6 +1524,8 @@ def convert_plantuml_to_drawio(input_file: str, output_file: Optional[str] = Non
             mxfile = generator.generate_usecase_diagram(data)
         elif parser.diagram_type == DiagramType.ACTIVITY:
             mxfile = generator.generate_activity_diagram(data)
+        elif parser.diagram_type == DiagramType.COMPONENT:
+            mxfile = generator.generate_component_diagram(data)
         else:
             print(f"Erreur: Conversion non implémentée pour {parser.diagram_type.value}")
             return False
